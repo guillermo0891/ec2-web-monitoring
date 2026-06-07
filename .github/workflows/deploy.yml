@@ -53,6 +53,31 @@ jobs:
           IMAGE=${{ steps.ecr.outputs.repo_uri }}:${{ github.sha }}
           docker push $IMAGE
 
+      - name: Ensure ECS cluster exists
+        run: |
+            CLUSTER="${{ env.ECS_CLUSTER }}"
+            if ! aws ecs describe-clusters --clusters "$CLUSTER" --region "${{ env.AWS_REGION }}" --query "clusters[0].status" --output text >/dev/null 2>&1; then
+            echo "Cluster $CLUSTER not found, creating..."
+            aws ecs create-cluster --cluster-name "$CLUSTER" --region "${{ env.AWS_REGION }}"
+            else
+            echo "Cluster exists"
+            fi
+
+      - name: Ensure ECS service exists
+        run: |
+            CLUSTER="${{ env.ECS_CLUSTER }}"
+            SERVICE="${{ env.ECS_SERVICE }}"
+            if ! aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --region "${{ env.AWS_REGION }}" --query "services[0].status" --output text >/dev/null 2>&1; then
+            echo "Service $SERVICE not found in cluster $CLUSTER. Create service via Terraform or ensure task definition and network config exist."
+            exit 1
+            else
+            echo "Service exists"
+            fi
+
+      - name: Update ECS service (force new deployment)
+        run: |
+            aws ecs update-service --cluster "${ECS_CLUSTER}" --service "${ECS_SERVICE}" --force-new-deployment --region "${AWS_REGION}"
+
       - name: Update ECS service (force new deployment)
         run: |
           aws ecs update-service --cluster "${ECS_CLUSTER}" --service "${ECS_SERVICE}" --force-new-deployment --region "${AWS_REGION}"
