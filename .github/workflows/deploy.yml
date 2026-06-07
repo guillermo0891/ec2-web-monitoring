@@ -14,17 +14,37 @@ env:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+            aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+            aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: ./terraform
+        run: terraform init -input=false
+
+      - name: Terraform Apply
+        working-directory: ./terraform
+        env:
+            AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+            AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            AWS_REGION: ${{ env.AWS_REGION }}
+        run: terraform apply -auto-approve -input=false
 
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v1
@@ -32,52 +52,49 @@ jobs:
       - name: Ensure ECR repo exists and get URI
         id: ecr
         run: |
-          set -e
-          REPO_NAME="${{ env.ECR_REPO }}"
-          if ! aws ecr describe-repositories --repository-names "$REPO_NAME" > /dev/null 2>&1; then
-            echo "Repository $REPO_NAME not found — creating"
-            aws ecr create-repository --repository-name "$REPO_NAME" >/dev/null
-          fi
-          REPO_URI=$(aws ecr describe-repositories --repository-names "$REPO_NAME" --query 'repositories[0].repositoryUri' --output text)
-          echo "repo_uri=$REPO_URI" >> $GITHUB_OUTPUT
+            set -e
+            REPO_NAME="${{ env.ECR_REPO }}"
+            if ! aws ecr describe-repositories --repository-names "$REPO_NAME" --region "${{ env.AWS_REGION }}" > /dev/null 2>&1; then
+                echo "Repository $REPO_NAME not found — creating"
+                aws ecr create-repository --repository-name "$REPO_NAME" --region "${{ env.AWS_REGION }}" >/dev/null
+            fi
+            REPO_URI=$(aws ecr describe-repositories --repository-names "$REPO_NAME" --region "${{ env.AWS_REGION }}" --query 'repositories[0].repositoryUri' --output text)
+            echo "repo_uri=$REPO_URI" >> $GITHUB_OUTPUT
 
       - name: Build Docker image
         run: |
-          IMAGE_TAG=${{ github.sha }}
-          docker build -t ${ECR_REPO}:${IMAGE_TAG} .
-          docker tag ${ECR_REPO}:${IMAGE_TAG} ${{ steps.ecr.outputs.repo_uri }}:${IMAGE_TAG}
-          echo "image=${{ steps.ecr.outputs.repo_uri }}:${IMAGE_TAG}" >> $GITHUB_OUTPUT
+            IMAGE_TAG=${{ github.sha }}
+            docker build -t ${ECR_REPO}:${IMAGE_TAG} .
+            docker tag ${ECR_REPO}:${IMAGE_TAG} ${{ steps.ecr.outputs.repo_uri }}:${IMAGE_TAG}
+            echo "image=${{ steps.ecr.outputs.repo_uri }}:${IMAGE_TAG}" >> $GITHUB_OUTPUT
 
       - name: Push image to ECR
         run: |
-          IMAGE=${{ steps.ecr.outputs.repo_uri }}:${{ github.sha }}
-          docker push $IMAGE
+            REPO_URI="${{ steps.ecr.outputs.repo_uri }}" IMAGE="${REPO_URI}:${{ github.sha }}" REGISTRY="${REPO_URI%/*}" aws ecr get-login-password --region "${{ env.AWS_REGION }}" | docker login --username AWS --password-stdin "${REGISTRY}" docker push "$IMAGE"
 
       - name: Ensure ECS cluster exists
         run: |
             CLUSTER="${{ env.ECS_CLUSTER }}"
             if ! aws ecs describe-clusters --clusters "$CLUSTER" --region "${{ env.AWS_REGION }}" --query "clusters[0].status" --output text >/dev/null 2>&1; then
-            echo "Cluster $CLUSTER not found, creating..."
-            aws ecs create-cluster --cluster-name "$CLUSTER" --region "${{ env.AWS_REGION }}"
+                echo "Cluster $CLUSTER not found — creating"
+                aws ecs create-cluster --cluster-name "$CLUSTER" --region "${{ env.AWS_REGION }}"
             else
-            echo "Cluster exists"
+                echo "Cluster exists"
             fi
 
       - name: Ensure ECS service exists
         run: |
             CLUSTER="${{ env.ECS_CLUSTER }}"
             SERVICE="${{ env.ECS_SERVICE }}"
-            if ! aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --region "${{ env.AWS_REGION }}" --query "services[0].status" --output text >/dev/null 2>&1; then
-            echo "Service $SERVICE not found in cluster $CLUSTER. Create service via Terraform or ensure task definition and network config exist."
-            exit 1
+            STATUS=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --region "${{ env.AWS_REGION }}" --query "services[0].status" --output text 2>/dev/null || echo "MISSING")
+            if [ "$STATUS" = "MISSING" ] || [ "$STATUS" = "None" ]; then
+                echo "Service $SERVICE not found in cluster $CLUSTER. Terraform should have created it. Failing the job."
+                aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --region "${{ env.AWS_REGION }}"
+                exit 1
             else
-            echo "Service exists"
+                echo "Service exists (status: $STATUS)"
             fi
 
       - name: Update ECS service (force new deployment)
         run: |
-            aws ecs update-service --cluster "${ECS_CLUSTER}" --service "${ECS_SERVICE}" --force-new-deployment --region "${AWS_REGION}"
-
-      - name: Update ECS service (force new deployment)
-        run: |
-          aws ecs update-service --cluster "${ECS_CLUSTER}" --service "${ECS_SERVICE}" --force-new-deployment --region "${AWS_REGION}"
+            aws ecs update-service --cluster "${{ env.ECS_CLUSTER }}" --service "${{ env.ECS_SERVICE }}" --force-new-deployment --region "${{ env.AWS_REGION }}"
