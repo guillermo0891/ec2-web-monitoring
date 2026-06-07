@@ -27,11 +27,10 @@ jobs:
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v1
 
-      - name: Get ECR repository URI
+      - name: Ensure ECR repo exists and get URI
         id: ecr
-        run: |
-          REPO_URI=$(aws ecr describe-repositories --repository-names "${ECR_REPO}" --query 'repositories[0].repositoryUri' --output text)
-          echo "repo_uri=$REPO_URI" >> $GITHUB_OUTPUT
+        run: | 
+          set -e aws configure set default.region "${{ env.AWS_REGION }}" REPO_NAME="${{ env.ECR_REPO }}" if ! aws ecr describe-repositories --repository-names "$REPO_NAME" > /dev/null 2>&1; then echo "Repository $REPO_NAME not found — creating" aws ecr create-repository --repository-name "$REPO_NAME" >/dev/null fi REPO_URI=$(aws ecr describe-repositories --repository-names "$REPO_NAME" --query 'repositories[0].repositoryUri' --output text) echo "repo_uri=$REPO_URI" >> $GITHUB_OUTPUT
 
       - name: Build Docker image
         run: |
