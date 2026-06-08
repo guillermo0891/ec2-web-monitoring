@@ -49,7 +49,7 @@ jobs:
       - name: Ensure ECR repo exists and get URI
         id: ecr
         run: |
-          set -e
+          set -euo pipefail
           REPO_NAME="${{ env.ECR_REPO }}"
           REGION="${{ env.AWS_REGION }}"
           if ! aws ecr describe-repositories --repository-names "$REPO_NAME" --region "$REGION" > /dev/null 2>&1; then
@@ -59,24 +59,29 @@ jobs:
           REPO_URI=$(aws ecr describe-repositories --repository-names "$REPO_NAME" --region "$REGION" --query 'repositories[0].repositoryUri' --output text)
           echo "repo_uri=$REPO_URI" >> $GITHUB_OUTPUT
 
-      - name: Build Docker image
+      - name: Build Docker image (tag with SHA and :latest)
         run: |
+          set -euo pipefail
           IMAGE_TAG=${{ github.sha }}
           REPO_URI="${{ steps.ecr.outputs.repo_uri }}"
-          docker build -t "${ECR_REPO}:${IMAGE_TAG}" .
-          docker tag "${ECR_REPO}:${IMAGE_TAG}" "${REPO_URI}:${IMAGE_TAG}"
+          docker build -t "${REPO_URI}:${IMAGE_TAG}" .
+          docker tag "${REPO_URI}:${IMAGE_TAG}" "${REPO_URI}:latest"
           echo "image=${REPO_URI}:${IMAGE_TAG}" >> $GITHUB_OUTPUT
 
-      - name: Login to ECR and Push image
+      - name: Login to ECR and Push images
         run: |
+          set -euo pipefail
           REPO_URI="${{ steps.ecr.outputs.repo_uri }}"
-          IMAGE="${REPO_URI}:${{ github.sha }}"
+          IMAGE_SHA="${REPO_URI}:${{ github.sha }}"
+          IMAGE_LATEST="${REPO_URI}:latest"
           REGISTRY="${REPO_URI%/*}"
           aws ecr get-login-password --region "${{ env.AWS_REGION }}" | docker login --username AWS --password-stdin "${REGISTRY}"
-          docker push "${IMAGE}"
+          docker push "${IMAGE_SHA}"
+          docker push "${IMAGE_LATEST}"
 
       - name: Ensure ECS cluster exists
         run: |
+          set -euo pipefail
           CLUSTER="${{ env.ECS_CLUSTER }}"
           REGION="${{ env.AWS_REGION }}"
           if ! aws ecs describe-clusters --clusters "$CLUSTER" --region "$REGION" --query "clusters[0].status" --output text >/dev/null 2>&1; then
@@ -88,6 +93,7 @@ jobs:
 
       - name: Ensure ECS service exists
         run: |
+          set -euo pipefail
           CLUSTER="${{ env.ECS_CLUSTER }}"
           SERVICE="${{ env.ECS_SERVICE }}"
           REGION="${{ env.AWS_REGION }}"
